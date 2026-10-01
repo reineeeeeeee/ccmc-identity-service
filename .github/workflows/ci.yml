@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      # Tests create and drop their own temporary databases on this server.
+      TEST_PG_URL: postgres://postgres:postgres@127.0.0.1:5432/postgres
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: service
+      # ccms-shared is a sibling package (file:../ccms-shared). Set CCMS_SHARED_TOKEN if the repo is private.
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/ccms-shared
+          path: ccms-shared
+          token: ${{ secrets.CCMS_SHARED_TOKEN || github.token }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install shared library dependencies
+        working-directory: ccms-shared
+        run: npm ci
+      - name: Install
+        working-directory: service
+        run: npm ci
+      - name: Lint
+        working-directory: service
+        run: npm run lint
+      - name: No server-local date methods (Asia/Manila rule)
+        working-directory: service
+        run: npm run check:time
+      - name: Test
+        working-directory: service
+        run: npm test
+      - name: Build
+        working-directory: service
+        run: npm run build
