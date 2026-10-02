@@ -1,0 +1,39 @@
+{
+  "name": "ccms-identity-service",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "ccms": {
+    "service": "identity",
+    "port": 3001
+  },
+  "scripts": {
+    "dev": "node server/index.js dev",
+    "build": "next build",
+    "start": "node server/index.js start",
+    "lint": "eslint .",
+    "check:time": "ccms-check-time src scripts",
+    "test": "node --test \"test/**/*.test.js\"",
+    "db:sync": "node --env-file-if-exists=.env.local scripts/sync-db.js",
+    "ci": "npm run lint && npm run check:time && npm test && npm run build",
+    "bootstrap:admin": "node --env-file-if-exists=.env.local scripts/bootstrap-super-admin.js"
+  },
+  "dependencies": {
+    "ccms-shared": "file:./vendor/ccms-shared",
+    "http-proxy": "^1.18.1",
+    "jose": "^6.2.0",
+    "next": "^16.3.0",
+    "nodemailer": "^7.0.13",
+    "pg": "^8.13.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "typeorm": "^0.3.20"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4.1.0",
+    "eslint": "^9.0.0",
+    "eslint-config-next": "^16.3.0",
+    "postcss": "^8.5.0",
+    "tailwindcss": "^4.1.0"
+  }
+}

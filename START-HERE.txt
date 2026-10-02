@@ -1,0 +1,7 @@
+ccms-identity-service (port 3001): sign-in, reset password, Accounts, role home pages.
+The gateway is built in. See ../START-HERE.txt for the full steps, or:
+   npm install
+   npm run db:sync
+   npm run bootstrap:admin
+   npm run dev          then open http://localhost:3001
+Needs the database from the main START-HERE (docker, port 5440). Run ccms-catalogue-service too (port 3003).
