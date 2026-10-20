@@ -30,6 +30,11 @@ export function createMemoryStore() {
       entry.count += 1;
       return { count: entry.count, resetAt: entry.resetAt };
     },
+    async get(key, windowMs, time) {
+      const entry = hits.get(key);
+      if (!entry || entry.resetAt <= time) return { count: 0, resetAt: time + windowMs };
+      return { count: entry.count, resetAt: entry.resetAt };
+    },
     async reset() {
       hits.clear();
     },
@@ -62,6 +67,12 @@ export function createDbStore(getDb) {
       }
       return { count: Number(rows[0].count), resetAt: new Date(rows[0].reset_at).getTime() };
     },
+    async get(key, windowMs, time) {
+      const dataSource = await getDb();
+      const rows = await dataSource.query('SELECT count, reset_at FROM rate_limit_hits WHERE key = $1 AND reset_at > $2', [key, new Date(time)]);
+      if (!rows.length) return { count: 0, resetAt: time + windowMs };
+      return { count: Number(rows[0].count), resetAt: new Date(rows[0].reset_at).getTime() };
+    },
     async reset() {
       const dataSource = await getDb();
       await dataSource.getRepository(RateLimitHit).clear();
@@ -71,19 +82,19 @@ export function createDbStore(getDb) {
 
 export function createRateLimiter({ now = () => Date.now(), store = createMemoryStore(), failOpen = true } = {}) {
   return {
-    /** Counts one request. Returns { allowed, retryAfterSeconds }. */
-    async check(key, { limit, windowMs }) {
+    /** Checks the key and, by default, counts this request. Set consume=false to inspect only. */
+    async check(key, { limit, windowMs, consume = true }) {
       const time = now();
       let result;
       try {
-        result = await store.hit(key, windowMs, time);
+        result = consume ? await store.hit(key, windowMs, time) : await store.get(key, windowMs, time);
       } catch (err) {
         // A broken counter must not take the public site down.
         if (!failOpen) throw err;
         console.warn('Rate limit store unavailable, allowing request:', err.message);
         return { allowed: true, retryAfterSeconds: 0 };
       }
-      if (result.count > limit) {
+      if (consume ? result.count > limit : result.count >= limit) {
         return { allowed: false, retryAfterSeconds: Math.max(1, Math.ceil((result.resetAt - time) / 1000)) };
       }
       return { allowed: true, retryAfterSeconds: 0 };

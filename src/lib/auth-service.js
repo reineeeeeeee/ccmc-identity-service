@@ -30,7 +30,7 @@ async function issueSession(dataSource, account) {
 /**
  * Wrong password, unknown email and deactivated account all look identical to the caller and
  * take similar time. Sign-in and sign-out are not written to the audit trail (it records changes).
- * Lock-out after repeated failures: PM DECISION REQUIRED, not built.
+ * The login route applies the shared failure limiter before calling this credential check.
  */
 export async function login(dataSource, { email, password }) {
   const fail = () => Errors.unauthorized(BAD_CREDENTIALS, 'INVALID_CREDENTIALS');
@@ -48,18 +48,23 @@ export async function login(dataSource, { email, password }) {
   return issueSession(dataSource, account);
 }
 
-/** New access token from a valid refresh token. Role and office are read fresh from the account. */
+/** Atomically rotates a valid refresh token. Role and office are read fresh from the account. */
 export async function refresh(dataSource, refreshToken) {
   const fail = () => Errors.unauthorized('Your session has expired. Please sign in again.', 'INVALID_REFRESH_TOKEN');
   if (!refreshToken) throw fail();
-  const rows = await dataSource.query(
-    `SELECT a.account_id FROM refresh_tokens r JOIN accounts a ON a.account_id = r.account_id
-      WHERE r.token_hash = $1 AND r.revoked_at IS NULL AND r.expires_at > now() AND a.is_active = true`,
-    [hashToken(refreshToken)],
-  );
-  if (!rows.length) throw fail();
-  const account = await dataSource.getRepository(Account).findOneByOrFail({ accountId: rows[0].account_id });
-  return { accessToken: await signAccessToken(account), expiresIn: config.accessTokenSeconds, user: userFrom(account) };
+  return dataSource.transaction(async (manager) => {
+    const rows = await manager.query(
+      `SELECT a.account_id FROM refresh_tokens r JOIN accounts a ON a.account_id = r.account_id
+        WHERE r.token_hash = $1 AND r.revoked_at IS NULL AND r.expires_at > now() AND a.is_active = true
+        FOR UPDATE OF r`,
+      [hashToken(refreshToken)],
+    );
+    if (!rows.length) throw fail();
+
+    await manager.query('UPDATE refresh_tokens SET revoked_at = now() WHERE token_hash = $1', [hashToken(refreshToken)]);
+    const account = await manager.getRepository(Account).findOneByOrFail({ accountId: rows[0].account_id });
+    return issueSession(manager, account);
+  });
 }
 
 /** Revokes the refresh token so the session cannot be continued. Safe to call twice. */

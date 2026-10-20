@@ -1,4 +1,4 @@
-import { OutboxEvent } from 'ccms-shared';
+import { OutboxEvent, RateLimitHit } from 'ccms-shared';
 import { EntitySchema } from 'typeorm';
 
 // CCMS accounts. Independent of FMS and Audit (no SSO). Accounts are deactivated, never deleted,
@@ -61,4 +61,4 @@ export const PasswordResetToken = new EntitySchema({
   indices: [{ name: 'password_reset_tokens_account_idx', columns: ['accountId'] }],
 });
 
-export const entities = [Account, RefreshToken, PasswordResetToken, OutboxEvent];
+export const entities = [Account, RefreshToken, PasswordResetToken, OutboxEvent, RateLimitHit];

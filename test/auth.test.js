@@ -1,9 +1,10 @@
 import { strict as assert } from 'node:assert';
-import { after, before, describe, it } from 'node:test';
+import { fileURLToPath } from 'node:url';
+import { after, afterEach, before, describe, it } from 'node:test';
 import { decodeJwt, decodeProtectedHeader } from 'jose';
-import { ROLES, createTokenVerifier } from 'ccms-shared';
+import { ROLES, createMemoryStore, createRateLimiter, createTokenVerifier } from 'ccms-shared';
 import { GET as jwksRoute } from '../src/app/api/auth/jwks/route.js';
-import { POST as loginRoute } from '../src/app/api/auth/login/route.js';
+import { POST as loginRoute, setLoginLimiter } from '../src/app/api/auth/login/route.js';
 import { POST as logoutRoute } from '../src/app/api/auth/logout/route.js';
 import { POST as refreshRoute } from '../src/app/api/auth/refresh/route.js';
 import { GET as listRoute } from '../src/app/api/accounts/route.js';
@@ -16,8 +17,9 @@ before(async () => {
   ds = env.ds;
 });
 after(() => env?.cleanup());
+afterEach(() => setLoginLimiter(null));
 
-const login = (email, password) => loginRoute(req('POST', '/auth/login', { body: { email, password } }));
+const login = (email, password, headers) => loginRoute(req('POST', '/auth/login', { body: { email, password }, headers }));
 const refresh = (token) => refreshRoute(req('POST', '/auth/refresh', token ? { cookie: `ccms_refresh=${token}` } : {}));
 
 describe('CC003 sign in and sign out', () => {
@@ -104,6 +106,11 @@ describe('CC003 sign in and sign out', () => {
     const body = await renewed.json();
     assert.equal(decodeJwt(body.access_token).sub, account.accountId);
     assert.equal(body.user.role, ROLES.OFFICE_HEAD);
+    const rotatedToken = refreshTokenFrom(renewed);
+    assert.ok(rotatedToken);
+    assert.notEqual(rotatedToken, refreshToken);
+    assert.equal((await refresh(refreshToken)).status, 401, 'the old token cannot be reused');
+    assert.equal((await refresh(rotatedToken)).status, 200, 'the replacement token continues the session');
   });
 
   it('a renewed token reflects the account as it is now (role changes apply on refresh)', async () => {
@@ -161,7 +168,7 @@ describe('CC003 sign in and sign out', () => {
     const { readdirSync, statSync, readFileSync } = await import('node:fs');
     const { join } = await import('node:path');
     const walk = (dir) => readdirSync(dir).flatMap((n) => (statSync(join(dir, n)).isDirectory() ? walk(join(dir, n)) : [join(dir, n)]));
-    const files = walk(new URL('../src', import.meta.url).pathname).filter((f) => /\.(js|jsx)$/.test(f));
+    const files = walk(fileURLToPath(new URL('../src', import.meta.url))).filter((f) => /\.(js|jsx)$/.test(f));
     for (const file of files) {
       const source = readFileSync(file, 'utf8');
       // The only mention allowed is the test-visible "no Citizen role" rule comments; no route or role named citizen.
@@ -176,5 +183,92 @@ describe('CC003 sign in and sign out', () => {
     await logoutRoute(req('POST', '/auth/logout', { cookie: `ccms_refresh=${token}` }));
     const after = Number((await ds.query('SELECT count(*)::int AS n FROM audit_outbox'))[0].n);
     assert.equal(after, before);
+  });
+});
+
+describe('TT4 sign-in limiting and refresh rotation', () => {
+  it('TC4-IDN-001: the sixth failure for an email is limited for 15 minutes, then the window resets', async () => {
+    let now = 1_000_000;
+    setLoginLimiter(createRateLimiter({ now: () => now, store: createMemoryStore(), failOpen: false }));
+    const account = await seedAccount(ds);
+
+    for (let attempt = 1; attempt <= 5; attempt += 1) {
+      const response = await login(account.email.toUpperCase(), 'wrong-password', { 'x-forwarded-for': `10.0.0.${attempt}` });
+      assert.equal(response.status, 401, `failure ${attempt} remains below the limit`);
+    }
+
+    const limited = await login(account.email, PASSWORD, { 'x-forwarded-for': '10.0.0.6' });
+    assert.equal(limited.status, 429);
+    assert.equal(limited.headers.get('retry-after'), '900');
+    const body = await limited.json();
+    assert.equal(body.error.code, 'RATE_LIMITED');
+    assert.equal(body.error.message, 'Too many sign-in attempts. Try again in 900 seconds.');
+    assert.equal(limited.headers.get('set-cookie'), null);
+
+    now += 15 * 60_000;
+    assert.equal((await login(account.email, 'wrong-password', { 'x-forwarded-for': '10.0.0.7' })).status, 401);
+  });
+
+  it('TC4-IDN-001: the sixth failure from one address is limited across different emails', async () => {
+    setLoginLimiter(createRateLimiter({ store: createMemoryStore(), failOpen: false }));
+    const ip = '10.1.2.3';
+    for (let attempt = 1; attempt <= 5; attempt += 1) {
+      const response = await login(`unknown-${attempt}@pup.edu.ph`, 'wrong-password', { 'x-forwarded-for': ip });
+      assert.equal(response.status, 401);
+    }
+    assert.equal((await login('another@pup.edu.ph', 'wrong-password', { 'x-forwarded-for': ip })).status, 429);
+  });
+
+  it('successful sign-ins do not consume either failure budget', async () => {
+    setLoginLimiter(createRateLimiter({ store: createMemoryStore(), failOpen: false }));
+    const account = await seedAccount(ds);
+    const ip = '10.2.3.4';
+    for (let attempt = 0; attempt < 6; attempt += 1) {
+      assert.equal((await login(account.email, PASSWORD, { 'x-forwarded-for': ip })).status, 200);
+    }
+    assert.equal((await login(account.email, 'wrong-password', { 'x-forwarded-for': ip })).status, 401);
+  });
+
+  it('TC4-IDN-002: a wrong password below the limit keeps the generic 401 response', async () => {
+    setLoginLimiter(createRateLimiter({ store: createMemoryStore(), failOpen: false }));
+    const account = await seedAccount(ds);
+    const response = await login(account.email, 'wrong-password', { 'x-forwarded-for': '10.3.4.5' });
+    const body = await response.json();
+    assert.equal(response.status, 401);
+    assert.equal(body.error.code, 'INVALID_CREDENTIALS');
+    assert.equal(body.error.message, 'Incorrect email or password');
+  });
+
+  it('TC4-IDN-003: limiter-store failure closes sign-in with 503 and no token', async () => {
+    const downStore = {
+      async get() {
+        throw new Error('store down');
+      },
+      async hit() {
+        throw new Error('store down');
+      },
+      async reset() {},
+    };
+    setLoginLimiter(createRateLimiter({ store: downStore, failOpen: false }));
+    const account = await seedAccount(ds);
+    const response = await login(account.email, PASSWORD, { 'x-forwarded-for': '10.4.5.6' });
+    const body = await response.json();
+    assert.equal(response.status, 503);
+    assert.equal(body.error.code, 'SIGN_IN_UNAVAILABLE');
+    assert.equal(body.error.message, 'Sign-in is temporarily unavailable. Please try again.');
+    assert.equal(response.headers.get('set-cookie'), null);
+    assert.ok(!body.access_token);
+  });
+
+  it('TC4-IDN-004 and TC4-IDN-005: concurrent reuse lets one rotation win and rejects the other', async () => {
+    const account = await seedAccount(ds);
+    const token = refreshTokenFrom(await login(account.email, PASSWORD, { 'x-forwarded-for': '10.5.6.7' }));
+    const responses = await Promise.all([refresh(token), refresh(token)]);
+    assert.deepEqual(
+      responses.map((response) => response.status).sort(),
+      [200, 401],
+    );
+    const winner = responses.find((response) => response.status === 200);
+    assert.ok(refreshTokenFrom(winner));
   });
 });

@@ -61,6 +61,16 @@ Every route uses `requirePermission(roles, officeScope)` from `ccms-shared`. Tok
 against Identity's public keys (`IDENTITY_JWKS_URL`). Backend-only endpoints use the shared service key.
 Errors always use `{ error: { code, message, details, correlation_id, timestamp } }`.
 
+`POST /api/auth/login` accepts `{ "email": "staff@pup.edu.ph", "password": "..." }`. Five failed attempts
+per normalized email or per client address are allowed in each 15-minute window; the sixth returns
+`429 RATE_LIMITED` with `Retry-After`. Successful sign-ins do not consume either failure budget. If the
+shared limiter store is unavailable, sign-in fails closed with `503 SIGN_IN_UNAVAILABLE` and issues no token.
+
+`POST /api/auth/refresh` reads the `ccms_refresh` HttpOnly cookie (or `refresh_token` in a JSON body for API
+clients). A successful refresh atomically revokes the presented token, creates a replacement, returns a new
+access token, and sets the replacement cookie. Reusing an expired, revoked, or rotated token returns
+`401 INVALID_REFRESH_TOKEN` and clears the cookie.
+
 ## Scripts
 
 | Script | What it does |
