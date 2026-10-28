@@ -265,6 +265,7 @@ export async function requestPasswordReset(dataSource, actor, id, { ipAddress } 
     await recordAudit(manager, {
       actor,
       action: 'PASSWORD_RESET_REQUESTED',
+      entityName: dto.full_name,
       entityType: 'account',
       entityId: id,
       officeId: dto.office_id,
@@ -310,6 +311,7 @@ export async function completePasswordReset(dataSource, { token, newPassword }, 
     await recordAudit(manager, {
       actor: { id: accountId, role: account.roleKey },
       action: 'PASSWORD_RESET',
+      entityName: account.fullName,
       entityType: 'account',
       entityId: accountId,
       officeId: account.officeId,
